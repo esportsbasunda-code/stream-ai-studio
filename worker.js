@@ -275,17 +275,38 @@ async function tick(env) {
 /* ---------- dashboard ---------- */
 const EMO = ['😀','😂','🔥','👋','❤️','👍','🎮','🏆','😎','🤝','💯','🚀','😮','🙏','💪','✨','🎉','👀','😭','🤣','🥇','⚡','🫡','🙌'];
 
-const DASH = `
-Stream AI Studio V6
-
-Unlock
-passphrase
-
-Enter
-
-
-`;
-
+const DASH = String.raw`<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>Stream AI Studio V6 - Status</title>
+<style>body{margin:0;background:#101814;color:#e8f1eb;font:16px system-ui}main{max-width:720px;margin:auto;padding:22px}section{border:1px solid #415448;border-radius:12px;padding:16px;margin:16px 0;background:#19241d}button,input{font:inherit;padding:12px;border-radius:8px;border:1px solid #64796b;background:#26372d;color:#fff}input{box-sizing:border-box;width:100%;margin:8px 0}button{margin:5px 5px 5px 0;cursor:pointer}#stop{background:#a92530;border-color:#ed6973;font-weight:bold}pre{white-space:pre-wrap;overflow-wrap:anywhere;max-height:340px;overflow:auto}[hidden]{display:none!important}</style></head>
+<body><main><h1>Stream AI Studio V6</h1><p>Status and emergency stop</p>
+<section id="gate"><form id="login"><label for="pass">Dashboard passphrase</label><input id="pass" type="password" required autocomplete="current-password"><button type="submit">Unlock</button></form></section>
+<p id="notice" role="status" aria-live="polite"></p>
+<div id="panel" hidden><section><h2>Emergency controls</h2><button id="stop" type="button">STOP ALL</button><button id="refresh" type="button">Refresh status</button><button id="logout" type="button">Log out</button></section>
+<section><h2>Current status</h2><pre id="stats"></pre></section><section><h2>Recent history</h2><pre id="history"></pre></section></div>
+</main><script>
+const el = id => document.getElementById(id);
+async function request(path, method = 'GET', body) {
+  const options = { method, credentials: 'same-origin', cache: 'no-store' };
+  if (body !== undefined) { options.headers = {'content-type':'application/json'}; options.body = JSON.stringify(body); }
+  const r = await fetch(path, options); const data = await r.json();
+  if (!r.ok) throw new Error(data.error || 'Request failed: ' + r.status);
+  return data;
+}
+function show(open) { el('gate').hidden = open; el('panel').hidden = !open; if(!open){el('stats').textContent='';el('history').textContent='';} }
+async function refresh() {
+  const s = await request('/api/stats');
+  el('stats').textContent = ['Sent (24h): '+s.sent24h,'Failed (24h): '+s.fail24h,'Pending: '+s.queued,'Live: '+s.live,'Accounts: '+s.accounts].join('\n');
+  const h = await request('/api/log');
+  el('history').textContent = h.map(x=>new Date(x.ts).toLocaleString()+' | '+x.slug+' | '+(x.ok?'OK':'Failed')+' | '+x.content).join('\n') || 'No history';
+  show(true);
+}
+const notice = msg => {el('notice').textContent=msg;};
+el('login').onsubmit=async e=>{e.preventDefault();try{await request('/api/login','POST',{pass:el('pass').value}); el('pass').value=''; await refresh();notice('Unlocked');}catch(e){notice(e.message);}};
+el('refresh').onclick=()=>refresh().catch(e=>notice(e.message));
+el('stop').onclick=async()=>{if(!confirm('Stop all channels and cancel pending messages?'))return;el('stop').disabled=true;try{const r=await request('/api/stop','POST');if(!r.stopped||!r.queue_cancelled)throw new Error('Stop not confirmed');notice('Stop recorded. In-flight requests may still finish.');try{await refresh();}catch(e){notice('Stop recorded. Status refresh failed: '+e.message);}}catch(e){notice('Stop not confirmed: '+e.message);}finally{el('stop').disabled=false;}};
+el('logout').onclick=async()=>{try{await request('/api/logout','POST');show(false);notice('Logged out');}catch(e){notice(e.message);}};
+refresh().catch(()=>show(false));
+</script></body></html>`;
 /* ---------- router ---------- */
 const json = (o, s = 200, h = {}) => new Response(JSON.stringify(o), { status: s, headers: { 'content-type': 'application/json', ...h } });
 const cookie = (req, name) => {
@@ -418,7 +439,15 @@ export default {
         }
       }
 
-      if (res === 'msglist' && req.method === 'GET')
+      if (res === 'stop' && req.method === 'POST') {
+        await env.DB.batch([
+          env.DB.prepare("UPDATE stream_channels SET state='stopped'"),
+          env.DB.prepare("UPDATE msg_queue SET status='cancelled' WHERE status='pending'")
+        ]);
+        return json({ ok: true, stopped: true, queue_cancelled: true }, 200, cors);
+      }
+
+if (res === 'msglist' && req.method === 'GET')
         return json((await env.DB.prepare('SELECT id,content FROM msg_bank WHERE lang=? AND active=1 ORDER BY id DESC LIMIT 60')
           .bind(url.searchParams.get('lang') || 'en').all()).results, 200, cors);
 
@@ -440,11 +469,7 @@ export default {
         else await env.DB.prepare("UPDATE stream_channels SET state='running', next_send_at=? WHERE state='stopped'").bind(Date.now()).run();
         return json({ ok: true }, 200, cors);
       }
-      if (res === 'stop' && req.method === 'POST') {
-        if (id) await env.DB.prepare("UPDATE stream_channels SET state='stopped' WHERE id=?").bind(id).run();
-        else await env.DB.prepare("UPDATE stream_channels SET state='stopped'").run();
-        return json({ ok: true }, 200, cors);
-      }
+     
       if (res === 'rotate' && req.method === 'POST') {
         await env.DB.prepare("UPDATE stream_channels SET rotate_at=0 WHERE state='running'").run();
         return json({ ok: true }, 200, cors);
